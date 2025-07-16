@@ -40,9 +40,9 @@ class MessageHandler:
             return f"Skipping friend code image: `{image_att.filename}`"
         
         # Send processing message
-        processing_msg = await message.channel.send(
-            f"Analyzing attachments in message `{message.id}`..."
-        )
+        # processing_msg = await message.channel.send(
+        #     f"Analyzing attachments in message `{message.id}`..."
+        # )
         
         # Setup temp file paths
         image_path = os.path.join(self.settings.temp_dir, image_att.filename)
@@ -75,35 +75,64 @@ class MessageHandler:
             )
             
             if report:
-                await processing_msg.edit(content=report)
-            else:
-                await processing_msg.delete()
+                processing_msg = await message.channel.send(embed=report)
             
             return report
             
         except Exception as e:
             logging.error("ERROR processing %s: %s", image_att.filename, e, exc_info=True)
             error_msg = f"An error occurred while processing `{image_att.filename}`: {type(e).__name__}"
-            await processing_msg.edit(content=error_msg)
+            await message.channel.send(content=error_msg)
             return error_msg
-            
+                    
         finally:
             for path in temp_files_to_delete:
                 if os.path.exists(path):
                     os.remove(path)
     
     async def _generate_report(self, filename: str, message_id: int, analysis_reports: list, 
-                             created_at: datetime, device_account: str, device_password: str):
-        """Generate analysis report for a message."""
-
-        report = f"**Analysis for `{filename}` (MSG ID: {message_id}):**\n"
+                         created_at: datetime, device_account: str, device_password: str):
+        """Generate analysis report as a Discord embed."""
+        
+        embed = discord.Embed(
+            color=0x5865F2,
+            timestamp=created_at
+        )
+        
+        embed.set_author(name="Card Detection Analysis")
+        embed.set_footer(text=f"{message_id}")
         
         if not analysis_reports:
-            report += "YOLO did not detect any cards."
+            embed.add_field(
+                name="Account:", 
+                value=device_account if device_account else "N/A", 
+                inline=False
+            )
+            embed.add_field(
+                name="Password:", 
+                value=device_password if device_password else "N/A", 
+                inline=False
+            )
+            embed.add_field(
+                name="Cards:", 
+                value="No cards detected", 
+                inline=True
+            )
         else:
+            embed.add_field(
+                name="Account:", 
+                value= f'`{device_account}`' if device_account else "`N/A`", 
+                inline=False
+            )
+            embed.add_field(
+                name="Password:", 
+                value= f'`{device_password}`' if device_password else "`N/A`", 
+                inline=False
+            )
+            
+            cards_list = []
+            
             for i, data in enumerate(analysis_reports):
-                report += f"\n--- **Detected Card #{i + 1}** ---\n"
-                
                 winning_algo, final_result = self.vision_pipeline.feature_matching.get_best_identification(data)
                 
                 if winning_algo and final_result:
@@ -112,8 +141,23 @@ class MessageHandler:
                     card_name = card_info.get('card_name', 'Unknown')
                     rarity = card_info.get('rarity', 'Unknown')
                     
-                    report += f"Identified as **{card_name}** (Rarity: {rarity}) via `{winning_algo.upper()}`"
+                    rarity_emoji = {
+                        'one diamond': '<:onediamond:1395183573216264262>',
+                        'two diamond': '<:twodiamond:1395183576097755146>',
+                        'three diamond': '<:threediamond:1395183579721367724>',
+                        'four diamond': '<:fourdiamond:1395183583081009233>',
+                        'one star': '<:onestar:1395183574881402951>',
+                        'two star': '<:twostar:1395183577561305199>',
+                        'three star': '<:threestar:1395183581156085800>',
+                        'shiny': '<:shiny:1395183587661320262>',
+                        'two shiny': '<:twoshiny:1395183586189246545>',
+                        'crown': '<:crown:1395183584490291240>'
+                    }.get(rarity.lower(), '')
                     
+                    # Add to cards list
+                    cards_list.append(f"{card_name} {rarity_emoji}")
+                    
+                    # Log to CSV and Supabase
                     log_entry = {
                         "timestamp": created_at.strftime("%Y-%m-%d %H:%M:%S"),
                         "deviceAccount": device_account,
@@ -124,17 +168,25 @@ class MessageHandler:
                     }
                     
                     logging.info("CSV_LOG: Writing -> Time: %s, Card: %s, Rarity: %s", 
-                               log_entry['timestamp'], card_name, rarity)
+                            log_entry['timestamp'], card_name, rarity)
                     self.logging_service.log_detection(log_entry)
 
                     if self.settings.supabase_enabled and self.supabase_service:
                         logging.info("SUPABASE: Inserting detection for %s", card_name)
                         self.supabase_service.insert_detection(log_entry)
                 else:
-                    report += "Could not identify this card."
+                    cards_list.append("Unknown Card")
+            
+            # Add cards field with all cards in one field
+            cards_value = "\n".join(cards_list) if cards_list else "No cards detected"
+            embed.add_field(
+                name="Cards", 
+                value=cards_value, 
+                inline=True
+            )
         
-        return report
-    
+        return embed
+        
     async def parse_historical_messages(self, client, target_channel_id: int):
         """Parse historical messages in the target channel."""
 
